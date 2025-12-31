@@ -1,0 +1,326 @@
+---
+title: "Forecast Comparison VAR vs RF vs BART"
+output:
+  pdf_document:
+    number_sections: false
+  html_notebook: default
+  word_document: default
+df_print: paged
+---
+```{r}
+R_packages <- c("readr", "dplyr", "tidyr", "tibble",
+                "ggplot2", "lubridate", "knitr", "zoo")
+
+options(repos = c(CRAN = "https://cloud.r-project.org"))
+
+if (!requireNamespace("librarian", quietly = TRUE)) {
+  install.packages("librarian")
+}
+
+librarian::shelf(R_packages)
+if (!requireNamespace("tinytex", quietly = TRUE)) install.packages("tinytex")
+if (Sys.which("pdflatex")=="") {library(tinytex); tinytex::install_tinytex()}
+theme_set(theme_bw())
+knitr::opts_knit$set(root.dir = getwd())
+options(knitr.kable.NA = "", knitr.kable.auto_format = FALSE)
+knitr::opts_knit$set(kable.auto_number = FALSE)
+```
+
+```{r}
+### Read csv for previous notebook: VAR_final_with_aplication, RF_application, etc
+var_short <- read_csv("VAR_large_all_variables_short.csv", show_col_types = FALSE) |>
+  mutate(model = "VAR", horizon_group = "short")
+
+var_long  <- read_csv("VAR_large_all_variables_long.csv",  show_col_types = FALSE) |>
+  mutate(model = "VAR", horizon_group = "long")
+
+
+rf_short <- read_csv("RF_all_variables_short.csv", show_col_types = FALSE) |>
+  mutate(model = "Random Forest", horizon_group = "short")
+
+rf_long  <- read_csv("RF_all_variables_long.csv",  show_col_types = FALSE) |>
+  mutate(model = "Random Forest", horizon_group = "long")
+
+
+bart_short <- read_csv("BART_all_variables_short.csv", show_col_types = FALSE) |>
+  mutate(model = "BART", horizon_group = "short")
+
+bart_long  <- read_csv("BART_all_variables_long.csv",  show_col_types = FALSE) |>
+  mutate(model = "BART", horizon_group = "long")
+```
+
+
+```{r, message = FALSE, warning = FALSE}
+get_fc <- function(df, var_name, horizons) {
+  df %>%
+    filter(variable == var_name, h %in% horizons) %>%   # use h column
+    arrange(h) %>%
+    pull(forecast)
+}
+
+h_short <- 1:3
+h_long  <- 1:12
+
+tbl_GDP_short <- tibble(
+  h              = h_short,
+  `VAR `= get_fc(var_short,  "GDP_per_w",   h_short),
+  `Random Forest`= get_fc(rf_short,   "GDP_per_w",   h_short),
+  BART           = get_fc(bart_short, "GDP_per_w",   h_short)
+)
+
+tbl_GDP_long <- tibble(
+  h              = h_long,
+  `VAR`= get_fc(var_long,   "GDP_per_w",   h_long),
+  `Random Forest`= get_fc(rf_long,    "GDP_per_w",   h_long),
+  BART           = get_fc(bart_long,  "GDP_per_w",   h_long)
+)
+
+tbl_CPI_short <- tibble(
+  h              = h_short,
+  `VAR `= get_fc(var_short,  "CPI_ALL_CAN",   h_short),
+  `Random Forest`= get_fc(rf_short,   "CPI_ALL_CAN",   h_short),
+  BART           = get_fc(bart_short, "CPI_ALL_CAN",   h_short)
+)
+
+tbl_CPI_long <- tibble(
+  h              = h_long,
+  `VAR`= get_fc(var_long,   "CPI_ALL_CAN",   h_long),
+  `Random Forest`= get_fc(rf_long,    "CPI_ALL_CAN",   h_long),
+  BART           = get_fc(bart_long,  "CPI_ALL_CAN",   h_long)
+)
+
+tbl_HOUSE_short <- tibble(
+  h              = h_short,
+  `VAR`= get_fc(var_short,  "NHOUSE_P_CAN",   h_short),
+  `Random Forest`= get_fc(rf_short,   "NHOUSE_P_CAN",   h_short),
+  BART           = get_fc(bart_short, "NHOUSE_P_CAN",   h_short)
+)
+
+tbl_HOUSE_long <- tibble(
+  h              = h_long,
+  `VAR `= get_fc(var_long,   "NHOUSE_P_CAN",   h_long),
+  `Random Forest`= get_fc(rf_long,    "NHOUSE_P_CAN",   h_long),
+  BART           = get_fc(bart_long,  "NHOUSE_P_CAN",   h_long)
+)
+
+scale_to_pct <- function(tbl) {
+  tbl %>%
+    dplyr::mutate(dplyr::across(-h, ~ . * 100))
+}
+
+tbl_GDP_short  <- scale_to_pct(tbl_GDP_short)
+tbl_GDP_long   <- scale_to_pct(tbl_GDP_long)
+tbl_CPI_short  <- scale_to_pct(tbl_CPI_short)
+tbl_CPI_long   <- scale_to_pct(tbl_CPI_long)
+tbl_HOUSE_short <- scale_to_pct(tbl_HOUSE_short)
+tbl_HOUSE_long  <- scale_to_pct(tbl_HOUSE_long)
+
+knitr::kable(
+  tbl_GDP_short,
+  digits  = 4,
+  caption = "Short-horizon forecasts for GDP per worker (h = 1–3, pct.)"
+)
+
+knitr::kable(
+  tbl_GDP_long,
+  digits  = 4,
+  caption = "Long-horizon forecasts for GDP per worker (h = 1–12, pct.)"
+)
+
+knitr::kable(
+  tbl_CPI_short,
+  digits  = 4,
+  caption = "Short-horizon forecasts for CPI inflation (h = 1–3, pct.)"
+)
+
+knitr::kable(
+  tbl_CPI_long,
+  digits  = 4,
+  caption = "Long-horizon forecasts for CPI inflation (h = 1–12, pct.)"
+)
+
+knitr::kable(
+  tbl_HOUSE_short,
+  digits  = 4,
+  caption = "Short-horizon forecasts for house prices (h = 1–3, pct.)"
+)
+
+knitr::kable(
+  tbl_HOUSE_long,
+  digits  = 4,
+  caption = "Long-horizon forecasts for house prices (h = 1–12, pct.)"
+)
+
+```
+#. Forecast!
+```{r, echo=FALSE, message=FALSE, warning=FALSE, fig.show='hold', fig.width=7, fig.height=7}
+
+forecasts_all <- bind_rows(
+  var_short, var_long,
+  rf_short,  rf_long,
+  bart_short, bart_long
+) %>%
+  filter(variable %in% c("GDP_per_w", "CPI_ALL_CAN", "NHOUSE_P_CAN")) %>%
+  mutate(date = as.Date(date))
+
+models_vec <- sort(unique(forecasts_all$model))
+
+
+data_full <- read.csv("balanced_can_md.csv")
+data_full$Date <- as.Date(data_full$Date)
+data_full$GDP_per_w <- data_full$GDP_new - data_full$EMP_CAN
+
+last_date <- max(data_full$Date)
+
+Dat_all <- zoo(
+  data_full[, c("GDP_per_w", "CPI_ALL_CAN", "NHOUSE_P_CAN")],
+  order.by = data_full$Date
+)
+
+start_plot_short <- last_date %m-% months(6)
+end_plot_short   <- last_date %m+% months(3)
+
+start_plot_long  <- as.Date("2024-01-01")
+end_plot_long    <- last_date %m+% months(12)
+
+Dat_short <- window(Dat_all, start = start_plot_short, end = last_date)
+Dat_long  <- window(Dat_all, start = start_plot_long,  end = last_date)
+
+make_hist_long <- function(Dat_zoo, horiz_label) {
+  fortify.zoo(Dat_zoo) %>%
+    rename(date = Index) %>%
+    pivot_longer(
+      cols      = c(GDP_per_w, CPI_ALL_CAN, NHOUSE_P_CAN),
+      names_to  = "variable",
+      values_to = "value"
+    ) %>%
+    mutate(horizon_group = horiz_label)
+}
+
+hist_short <- make_hist_long(Dat_short, "short")
+hist_long  <- make_hist_long(Dat_long,  "long")
+
+
+hist_all <- bind_rows(
+  tidyr::crossing(model = models_vec, hist_short),
+  tidyr::crossing(model = models_vec, hist_long)
+) %>%
+  mutate(type = "Data")
+
+fc_all <- forecasts_all %>%
+  select(model, horizon_group, variable, date, forecast) %>%
+  rename(value = forecast) %>%
+  mutate(type = "Forecast")
+
+plot_all <- bind_rows(hist_all, fc_all)
+
+
+p_short <- plot_all %>%
+  filter(horizon_group == "short") %>%
+  ggplot(aes(x = date, y = value, colour = type)) +
+  geom_line() +
+  facet_grid(variable ~ model, scales = "free_y") +
+  labs(
+    title = "Short-horizon forecasts (h = 1–3)",
+    x = "Date",
+    y = "Growth rate"
+  ) +
+  coord_cartesian(xlim = c(start_plot_short, end_plot_short)) +
+  scale_colour_manual(values = c("Data" = "black", "Forecast" = "red")) +
+  theme_bw() +
+  theme(legend.position = "bottom")
+
+print(p_short)
+
+
+p_long <- plot_all %>%
+  filter(horizon_group == "long") %>%
+  ggplot(aes(x = date, y = value, colour = type)) +
+  geom_line() +
+  facet_grid(variable ~ model, scales = "free_y") +
+  labs(
+    title = "Long-horizon forecasts (h = 1–12)",
+    x = "Date",
+    y = "Growth rate"
+  ) +
+  coord_cartesian(xlim = c(start_plot_long, end_plot_long)) +
+  scale_colour_manual(values = c("Data" = "black", "Forecast" = "red")) +
+  theme_bw() +
+  theme(legend.position = "bottom")
+
+print(p_long)
+```
+
+
+
+```{r}
+comparison <- tribble(
+  ~Model,               ~RMSE_1to3,   ~RMSE_1to12,
+  "Small VAR (3 vars)",   0.003892,     0.003624,
+  "Large VAR (17 vars)",  0.0030008,    0.0034235,
+  "Random Forest",        0.002372,     0.002554,
+  "BART",                 0.00266,      0.002717
+)
+
+lag_info <- tribble(
+  ~Model,               ~p_short, ~p_long,
+  "Small VAR (3 vars)",      7,        7,
+  "Large VAR (17 vars)",     2,        1,
+  "Random Forest",          12,        5,
+  "BART",                   11,        3
+)
+
+summary_table <- comparison %>%
+  left_join(lag_info, by = "Model") %>%
+  select(Model, p_short, RMSE_1to3, p_long, RMSE_1to12)
+
+summary_print <- summary_table
+colnames(summary_print) <- c(
+  "Model",
+  "p (h = 1–3)",
+  "RMSE 1–3",
+  "p (h = 1–12)",
+  "RMSE 1–12"
+)
+
+cat("\\setcounter{table}{1}")
+kable(
+  summary_print,
+  digits  = 4,
+  caption = "Summary of optimal lags and forecast accuracy (RMSE)"
+)
+```
+
+```{r}
+vars_large_17 <- tibble::tribble(
+  ~Variable,       ~Block,          ~Short_Description,
+  "GDP_per_w",     "Target",        "GDP per worker, monthly growth",
+  "CPI_ALL_CAN",   "Target",        "Headline CPI inflation, monthly",
+  "NHOUSE_P_CAN",  "Target",        "National house price index, monthly",
+  "IP_new",        "Real activity", "Industrial production index, monthly",
+  "BSI_new",       "Real activity", "Business sentiment / survey index",
+  "UNEMP_CAN",     "Labour",        "Unemployment rate, Canada",
+  "EMP_CONS_CAN",  "Labour",        "Construction employment, Canada",
+  "hstart_CAN_new","Housing",       "Housing starts, Canada, monthly",
+  "CRED_HOUS",     "Credit",        "Household / housing credit stock",
+  "CRED_HOUS_MORT","Credit",        "Mortgage credit for housing",
+  "BANK_RATE_L",   "Interest",      "BoC policy rate (level)",
+  "TBILL_3M",      "Interest",      "3-month T-bill rate",
+  "Exp_BP_new",    "External",      "Exports of goods (BOP), monthly",
+  "Imp_BP_new",    "External",      "Imports of goods (BOP), monthly",
+  "IPPI_METAL_CAN","Prices",        "Metal producer price index, Canada",
+  "OILP_new",      "Commodities",   "Oil price index",
+  "WTISPLC",       "Commodities",   "WTI spot crude oil price (level)"
+)
+```
+
+```{r}
+knitr::kable(
+  vars_large_17,
+  booktabs = TRUE,
+  caption = " The 17 variables selected for the large VAR model"
+)
+write.csv(vars_large_17, "vars_17_large_model.csv", row.names = FALSE)
+
+```
+

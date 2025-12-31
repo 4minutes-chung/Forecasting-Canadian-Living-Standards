@@ -1,0 +1,218 @@
+---
+title: "BART Application"
+output:
+  pdf_document: default
+  html_notebook: default
+  word_document: default
+---
+This file: we already had optimal lag solved in Kaggle, based on that opt_p, and all other parameter assumed, here target to fit in specific models and forecast for our varaibles locally
+
+```{r, message=FALSE, warning=FALSE, echo=TRUE, results='hide'}
+R_packages <- c("dbarts", "tidyverse", "lubridate", "knitr", "tibble")
+
+options(repos = c(CRAN = "https://cloud.r-project.org"))
+
+if (!requireNamespace("librarian", quietly = TRUE))
+  install.packages("librarian")
+
+librarian::shelf(R_packages)
+set.seed(12345)
+```
+# 1. DATA as usual
+```{r}
+df_ml <- read.csv("balanced_can_md.csv")
+df_ml$GDP_per_w <- df_ml$GDP_new - df_ml$EMP_CAN
+df_ml %>% 
+  select(Date, GDP_new, EMP_CAN, GDP_per_w) %>% 
+  head(10)
+
+targets <- c("GDP_per_w", "CPI_ALL_CAN", "NHOUSE_P_CAN")
+
+features_large <- c(
+  "GDP_per_w", "CPI_ALL_CAN", "NHOUSE_P_CAN", "IP_new",
+  "BSI_new", "UNEMP_CAN", "EMP_CONS_CAN", "hstart_CAN_new",
+  "CRED_HOUS", "CRED_HOUS_MORT", "BANK_RATE_L", "TBILL_3M",
+  "Exp_BP_new", "Imp_BP_new", "IPPI_METAL_CAN", "OILP_new",
+  "WTISPLC"
+)
+```
+
+# 2. Helper 
+```{r}
+build_lagged_panel <- function(df, predictors, target, p, h) {
+  dat <- df %>%
+    dplyr::select(Date, all_of(unique(c(predictors, target)))) %>%
+    arrange(Date)
+
+  for (lag in 1:p) {
+    for (v in predictors) {
+      dat[[paste0("L", lag, "_", v)]] <- dplyr::lag(dat[[v]], lag)
+    }
+  }
+
+  dat[[paste0("F", h, "_", target)]] <- dplyr::lead(dat[[target]], h)
+
+  dat_final <- dat %>% drop_na()
+  
+  X <- as.matrix(dat_final %>% select(starts_with("L")))
+  Y <- as.matrix(dat_final %>% select(starts_with("F")))
+
+  list(X = X, Y = Y)
+}
+
+target     <- "CPI_ALL_CAN"
+predictors <- features_large
+p_short <- 11
+p_long  <- 3
+```
+
+
+```{r}
+ntrees_direct  <- 500
+nskips_direct  <- 1000
+ndposts_direct <- 2000
+
+bart_direct_h <- function(df, predictors, target, p, h) {
+
+  panel <- build_lagged_panel(df, predictors, target, p, h)
+  X <- panel$X
+  y <- panel$Y[, 1]
+
+  fit <- dbarts::bart(
+    x.train   = X,
+    y.train   = y,
+    ntree     = ntrees_direct,
+    nskip     = nskips_direct,
+    ndpost    = ndposts_direct,
+    keeptrees = TRUE,
+    verbose   = FALSE
+  )
+
+  X_last <- tail(X, 1)
+  pred   <- predict(fit, X_last)
+
+  as.numeric(mean(pred))
+}
+```
+
+
+```{r}
+horizons_short <- 1:3
+
+bart_short_fc_direct <- sapply(horizons_short, function(h) {
+  cat("Direct BART short, h =", h, "\n")
+  bart_direct_h(df_ml, predictors, target, p_short, h)
+})
+
+horizons_long <- 1:12
+
+bart_long_fc_direct <- sapply(horizons_long, function(h) {
+  cat("Direct BART long, h =", h, "\n")
+  bart_direct_h(df_ml, predictors, target, p_long, h)
+})
+
+
+last_date <- as.Date(tail(df_ml$Date, 1))
+
+bart_short_tbl <- tibble(
+  h        = horizons_short,
+  date     = seq(last_date %m+% months(1), by = "1 month", length.out = 3),
+  forecast = bart_short_fc_direct
+)
+
+bart_long_tbl <- tibble(
+  h        = horizons_long,
+  date     = seq(last_date %m+% months(1), by = "1 month", length.out = 12),
+  forecast = bart_long_fc_direct
+)
+
+knitr::kable(bart_short_tbl, digits = 4,
+             caption = "Direct BART CPI forecasts (h = 1–3)")
+knitr::kable(bart_long_tbl, digits = 4,
+             caption = "Direct BART CPI forecasts (h = 1–12)")
+```
+
+```{r}
+targets_to_run <- c("GDP_per_w", "CPI_ALL_CAN", "NHOUSE_P_CAN")
+
+all_short <- list()
+all_long  <- list()
+
+for (tt in targets_to_run) {
+  fc_s <- sapply(1:3, function(h) {
+    bart_direct_h(df_ml, predictors, tt, p_short, h)
+  })
+  all_short[[tt]] <- fc_s
+
+  fc_l <- sapply(1:12, function(h) {
+    bart_direct_h(df_ml, predictors, tt, p_long, h)
+  })
+  all_long[[tt]] <- fc_l
+}
+
+last_date <- as.Date(tail(df_ml$Date, 1))
+
+bart_short_all <- tibble(
+  variable = rep(targets_to_run, each = 3),
+  h        = rep(1:3, times = length(targets_to_run)),
+  date     = rep(seq(last_date %m+% months(1), by = "1 month", length.out = 3),
+                 times = length(targets_to_run)),
+  forecast = unlist(all_short)
+)
+
+bart_long_all <- tibble(
+  variable = rep(targets_to_run, each = 12),
+  h        = rep(1:12, times = length(targets_to_run)),
+  date     = rep(seq(last_date %m+% months(1), by = "1 month", length.out = 12),
+                 times = length(targets_to_run)),
+  forecast = unlist(all_long)
+)
+
+knitr::kable(bart_short_all, digits = 4,
+             caption = "Direct BART Forecasts (ALL VARIABLES, h = 1–3)")
+knitr::kable(bart_long_all, digits = 4,
+             caption = "Direct BART Forecasts (ALL VARIABLES, h = 1–12)")
+
+write.csv(bart_short_all, "BART_all_variables_short.csv", row.names = FALSE)
+write.csv(bart_long_all,  "BART_all_variables_long.csv",  row.names = FALSE)
+```
+
+
+
+ignore right now, old code not delete yet
+```{r}
+## hard code gen nice table lol
+comparison <- data.frame(
+  Model      = c("Small VAR (3 vars)",
+                 "Large VAR (17 vars)",
+                 "Random Forest",
+                 "BART"),
+  RMSE_1to3  = c(0.003892, 0.0030008, 0.002372, 0.00266),
+  RMSE_1to12 = c(0.003624, 0.0034235, 0.002554, 0.002717)
+)
+
+knitr::kable(comparison, digits=6,
+             caption = "Model Out-of-Sample-CV RMSE: VAR vs RF vs BART")
+```
+
+```{r}
+write.csv(
+  bart_short_tbl,
+  "BART_forecasts_short.csv",
+  row.names = FALSE
+)
+
+write.csv(
+  bart_long_tbl,
+  "BART_forecasts_long.csv",
+  row.names = FALSE
+)
+
+write.csv(
+  comparison,
+  "Model_Comparison_RMSE.csv",
+  row.names = FALSE
+)
+```
+
+

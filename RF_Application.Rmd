@@ -1,0 +1,177 @@
+---
+title: 'Random Forest – Application'
+output:
+  pdf_document: default
+---
+
+
+## 0.Packages
+```{r}
+# Start a new file, so dont need to do the cross validation (15 minutes) once again lol
+R_packages <- c(
+  "readr", "dplyr", "lubridate",
+  "ranger", "tidyr", "tibble", "knitr"
+)
+
+options(repos = c(CRAN = "http://cran.rstudio.com"))
+
+if (!requireNamespace("librarian", quietly = TRUE)) {
+  install.packages("librarian")
+}
+
+librarian::shelf(R_packages)
+
+set.seed(12345)
+```
+
+# 1. Data
+```{r}
+df_ml <- read_csv("balanced_can_md.csv", show_col_types = FALSE) %>%
+  mutate(
+    Date      = as.Date(Date),
+    GDP_per_w = GDP_new - EMP_CAN
+  ) %>%
+  arrange(Date)
+
+targets <- c("GDP_per_w", "CPI_ALL_CAN", "NHOUSE_P_CAN")
+
+features_large <- c(
+  "GDP_per_w", "CPI_ALL_CAN", "NHOUSE_P_CAN", "IP_new",
+  "BSI_new", "UNEMP_CAN", "EMP_CONS_CAN", "hstart_CAN_new",
+  "CRED_HOUS", "CRED_HOUS_MORT", "BANK_RATE_L", "TBILL_3M",
+  "Exp_BP_new", "Imp_BP_new", "IPPI_METAL_CAN", "OILP_new",
+  "WTISPLC"
+)
+
+setdiff(features_large, names(df_ml)) 
+
+```
+
+# 2. HELPER
+```{r}
+build_lagged_panel <- function(df, predictors, targets, p, h) {
+  dat <- df %>%
+    dplyr::select(Date, dplyr::all_of(unique(c(predictors, targets)))) %>%
+    arrange(Date)
+  
+  for (lag in 1:p) {
+    for (v in predictors) {
+      new_name <- paste0("L", lag, "_", v)
+      dat[[new_name]] <- dplyr::lag(dat[[v]], lag)
+    }
+  }
+  
+  for (v in targets) {
+    lead_name <- paste0("F", h, "_", v)
+    dat[[lead_name]] <- dplyr::lead(dat[[v]], h)
+  }
+  
+  lag_cols <- grep("^L[0-9]+_", names(dat), value = TRUE)
+  y_cols   <- paste0("F", h, "_", targets)
+  
+  dat_final <- dat %>%
+    dplyr::select(dplyr::all_of(c(lag_cols, y_cols))) %>%
+    tidyr::drop_na()
+  
+  list(
+    X = as.matrix(dat_final[, lag_cols, drop = FALSE]),
+    Y = as.matrix(dat_final[, y_cols,  drop = FALSE]) 
+  )
+}
+```
+
+
+```{r}
+## from that RF_final rmd file
+p_rf_short <- 12   
+p_rf_long  <- 5   
+
+num_trees_final <- 500 
+
+```
+
+
+```{r}
+rf_direct_h <- function(df, predictors, target, p, h,
+                        num.trees = num_trees_final) {
+  
+  panel <- build_lagged_panel(df, predictors, target, p, h)
+  X <- panel$X
+  y <- panel$Y[, 1] 
+
+  mtry_val <- max(1L, floor(ncol(X) / 3))
+  
+  train_df <- data.frame(y = y, X)
+  
+  rf_fit <- ranger::ranger(
+    dependent.variable.name   = "y",
+    data                      = train_df,
+    num.trees                 = num.trees,
+    mtry                      = mtry_val,
+    write.forest              = TRUE,
+    respect.unordered.factors = "order"
+  )
+  
+  X_last <- tail(X, 1)
+  pred   <- predict(rf_fit, data = as.data.frame(X_last))$predictions
+  
+  as.numeric(pred)
+}
+
+targets_to_run <- c("GDP_per_w", "CPI_ALL_CAN", "NHOUSE_P_CAN")
+
+all_short_rf <- list()
+all_long_rf  <- list()
+
+for (tt in targets_to_run) {
+  fc_s <- sapply(1:3, function(h) {
+    rf_direct_h(df_ml, features_large, tt, p_rf_short, h)
+  })
+  all_short_rf[[tt]] <- fc_s
+  
+  fc_l <- sapply(1:12, function(h) {
+    rf_direct_h(df_ml, features_large, tt, p_rf_long, h)
+  })
+  all_long_rf[[tt]] <- fc_l
+}
+
+last_date <- max(df_ml$Date)
+
+rf_short_all <- tibble(
+  variable = rep(targets_to_run, each = 3),
+  h        = rep(1:3, times = length(targets_to_run)),
+  date     = rep(seq(last_date %m+% months(1),
+                     by   = "1 month",
+                     length.out = 3),
+                 times = length(targets_to_run)),
+  forecast = unlist(all_short_rf)
+)
+
+rf_long_all <- tibble(
+  variable = rep(targets_to_run, each = 12),
+  h        = rep(1:12, times = length(targets_to_run)),
+  date     = rep(seq(last_date %m+% months(1),
+                     by   = "1 month",
+                     length.out = 12),
+                 times = length(targets_to_run)),
+  forecast = unlist(all_long_rf)
+)
+
+knitr::kable(
+  rf_short_all,
+  digits  = 4,
+  caption = "Direct RF forecasts (ALL VARIABLES, h = 1–3)"
+)
+
+knitr::kable(
+  rf_long_all,
+  digits  = 4,
+  caption = "Direct RF forecasts (ALL VARIABLES, h = 1–12)"
+)
+
+# export CSVs for later comparison
+write.csv(rf_short_all, "RF_all_variables_short.csv", row.names = FALSE)
+write.csv(rf_long_all,  "RF_all_variables_long.csv",  row.names = FALSE)
+```
+
+

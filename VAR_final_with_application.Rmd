@@ -1,0 +1,696 @@
+---
+title: "Baseline VAR – Canada GDP, Housing & Inflation"
+output:
+  pdf_document: default
+  html_document: default
+  word_document: default
+---
+# 0. Packages
+```{r, message=FALSE, warning=FALSE, echo=TRUE, results='hide'}
+R_packages <- c("readr", "dplyr", "tseries", "vars", "ggplot2", "lubridate", "scales", "tsDyn", "xts", "zoo", "tidyverse", "lubridate")
+
+options(repos = c(CRAN="http://cran.rstudio.com"))
+if (!requireNamespace("librarian", quietly = TRUE)) install.packages("librarian")
+librarian::shelf(R_packages)
+
+if (!requireNamespace("tinytex", quietly = TRUE)) install.packages("tinytex")
+if (Sys.which("pdflatex")=="") {library(tinytex); tinytex::install_tinytex()}
+```
+
+# 1. Data
+```{r}
+df <- read_csv("balanced_can_md.csv", show_col_types = FALSE)
+
+df_subset <- df %>%
+  dplyr::select(
+    Date,
+    GDP_new,
+    CPI_ALL_CAN,
+    NHOUSE_P_CAN,
+    EMP_CAN
+)
+
+head(df_subset)
+```
+## 1.1 Variable: National-level variables from Fortin
+```{r}
+## initial screening out provincial variables and some dubplicate one.
+
+vars_all_blocks <- c(
+  "GDP_new","IP_new","NDM_new","DM_new","CON_new","RT_new","WT_new",
+  "PA_new","FIN_new","BSI_new","GPI_new","SPI_new","TOT_HRS_CAN",
+  "CPI_ALL_CAN","IPPI_MACH_CAN","IPPI_METAL_CAN",
+  "OILP_new","OIL_CAN_new",
+  "BANK_RATE_L","TBILL_3M","TBILL_6M",
+  "G_AVG_5.10.Bank_rate","G_AVG_10p.TBILL_3M",
+  "USDCAD_new","GBPCAD_new","OILP_new","OIL_CAN_new","WTISPLC",
+  "Exp_BP_new","Imp_BP_new","FOR_SEC_NETFLOW",
+  "hstart_CAN_new","NHOUSE_P_CAN","CRED_HOUS_MORT","CRED_HOUS",
+  "FIN_new","EMP_CONS_CAN","EMP_FOR_OIL_CAN","TSX_CLO","TSX_HI",
+  "EMP_CAN","EMP_SERV_CAN","EMP_FIN_CAN","EMP_MANU_CAN",
+  "EMP_CONS_CAN","EMP_PART_CAN","EMP_FOR_OIL_CAN","EMP_SALES_CAN",
+  "UNEMP_CAN","UNEMP_DURA_1.4_CAN","UNEMP_DURA_5.13_CAN",
+  "UNEMP_DURAvg_CAN_new","CLAIMS_CAN"
+)
+
+df_large <- df %>% dplyr::select(Date, all_of(vars_all_blocks))
+head(df_large)
+```
+
+## 1.2 STATIONARITY TEST 
+```{r}
+vars <- names(df_large) 
+results <- data.frame(
+  variable  = character(),
+  statistic = numeric(),
+  p_value   = numeric(),
+  stringsAsFactors = FALSE
+)
+
+for (v in vars) {
+  x <- df_large[[v]]
+  if (is.numeric(x)) {
+
+    test <- withCallingHandlers(
+      adf.test(na.omit(x)),
+      warning = function(w) {
+        if (grepl("p-value smaller than printed p-value", w$message)) {
+          invokeRestart("muffleWarning")
+        }
+      }
+    )
+
+    results <- rbind(
+      results,
+      data.frame(
+        variable  = v,
+        statistic = as.numeric(test$statistic),
+        p_value   = as.numeric(test$p.value)
+      )
+    )
+  }
+}
+
+print(results)
+```
+
+## 1.3 Contruct GDP per worker growth rate estimate
+```{r}
+df_subset$GDP_per_w = df_subset$GDP_new - df_subset$EMP_CAN
+adf.test(df_subset$GDP_per_w)
+df_large$GDP_per_w = df_large$GDP_new - df_large$EMP_CAN
+```
+
+# 2. Three variable baseline
+```{r}
+df_subset$Date <- as.Date(df_subset$Date)
+
+start_year  <- as.numeric(format(min(df_subset$Date), "%Y"))
+start_month <- as.numeric(format(min(df_subset$Date), "%m"))
+vars_3 <- c("GDP_per_w", "NHOUSE_P_CAN", "CPI_ALL_CAN")
+```
+
+## 2.1 K-Fold Expanding Window Cross Validation 
+```{r}
+X <- df_subset %>%
+  dplyr::select(all_of(vars_3)) %>%
+  as.matrix() %>%
+  stats::na.omit()
+
+n <- nrow(X)
+## define a CV function for our purpose: optimize forecast for h= 1-3 and for h= 1-12, respectively
+ts_cv_rmse_for_p <- function(X, p, K, max_h) {
+  n <- nrow(X)
+  if (n <= p + K + 10) return(NA_real_)   
+  
+  cutpoints <- floor(seq(from = p + 20, to = n - max_h, length.out = K))
+  
+  err_list <- vector("list", max_h)
+  
+  for (t0 in cutpoints) {
+    train <- X[1:t0, , drop = FALSE]
+    
+    model <- try(VAR(train, p = p, type = "const"), silent = TRUE)
+    if (inherits(model, "try-error")) next
+    
+    # 1 to max_h-step-ahead forecasts from t0
+    fc_all <- predict(model, n.ahead = max_h)$fcst
+    
+    for (h in 1:max_h) {
+      # forecast at horizon h for all variables
+      fc_h <- sapply(fc_all, function(m) m[h, "fcst"])
+      
+      # actual at t0 + h
+      actual_h <- X[t0 + h, ]
+      
+      err_list[[h]] <- rbind(err_list[[h]], actual_h - fc_h)
+    }
+  }
+  
+  # if no errors were collected, return NA
+  if (all(vapply(err_list, is.null, logical(1L)))) return(NA_real_)
+  
+  # RMSE per horizon (averaged across variables),
+  rmse_h <- numeric(max_h)
+  for (h in 1:max_h) {
+    if (!is.null(err_list[[h]]) && nrow(err_list[[h]]) > 0L) {
+      rmse_vec <- sqrt(colMeans(err_list[[h]]^2, na.rm = TRUE))
+      rmse_h[h] <- mean(rmse_vec)
+    } else {
+      rmse_h[h] <- NA_real_
+    }
+  }
+  
+  mean(rmse_h[is.finite(rmse_h)])
+}
+```
+
+## 2.2 Small VAR: Short Term Model (h=1-3)
+```{r}
+min_p  <- 1     
+max_p  <- 12  
+step_p <- 1     
+
+p_grid <- seq(min_p, max_p, by = step_p)
+
+results_p <- data.frame(p = integer(), avg_RMSE = numeric())
+
+for (p in p_grid) {
+  avg_rmse <- ts_cv_rmse_for_p(X, p, K = 10, max_h = 3)  # CV over horizons 1–3
+  results_p <- rbind(results_p, data.frame(p = p, avg_RMSE = avg_rmse))
+  cat("Done CV: p =", p, "avg_RMSE =", round(avg_rmse, 6), "\n")
+}
+
+print(results_p)
+
+valid      <- which(is.finite(results_p$avg_RMSE))
+best_id    <- valid[ which.min(results_p$avg_RMSE[valid]) ]
+best_p_row <- results_p[best_id, ]
+best_p_row
+
+p_opt <- best_p_row$p
+
+var_ts <- df_subset %>%
+  dplyr::select(all_of(vars_3)) %>%
+  ts(start = c(start_year, start_month), frequency = 12) %>%
+  stats::na.omit()
+
+var_base <- VAR(y = var_ts, p = p_opt, type = "const")
+summary(var_base)
+```
+## 2.3 Small VAR: Long term Model (h=1-12)
+```{r}
+results_pl <- data.frame(p = integer(), avg_RMSE = numeric())
+
+for (p in p_grid) {
+  avg_rmsel <- ts_cv_rmse_for_p(X, p, K = 10, max_h = 12)  # CV over horizons 1–3
+  results_pl <- rbind(results_pl, data.frame(p = p, avg_RMSE = avg_rmsel))
+  cat("Done CV: p =", p, "avg_RMSE =", round(avg_rmsel, 6), "\n")
+}
+
+print(results_pl)
+
+validl      <- which(is.finite(results_pl$avg_RMSE))
+best_idl    <- validl[ which.min(results_pl$avg_RMSE[validl]) ]
+best_p_rowl <- results_pl[best_idl, ]
+best_p_rowl
+
+p_optl <- best_p_rowl$p
+
+var_base <- VAR(y = var_ts, p = p_optl, type = "const")
+summary(var_base)
+```
+
+# 3. Large model Variable selection: How we select the FINAL 17
+```{r}
+targets <- c("GDP_per_w", "CPI_ALL_CAN", "NHOUSE_P_CAN")
+
+all_numeric <- names(df_large)[sapply(df_large, is.numeric)]
+all_numeric <- setdiff(all_numeric, "Date")
+
+## 1. Correlation scores vs targets
+corr_score <- function(vname) {
+  x <- df_large[[vname]]
+  sapply(targets, function(tn) {
+    y <- df_large[[tn]]
+    abs(cor(x, y, use = "complete.obs"))
+  }) |>
+    max(na.rm = TRUE)
+}
+
+# score for variable
+scores_vec <- sapply(all_numeric, corr_score)
+
+corr_table <- data.frame(
+  variable = all_numeric,
+  score    = as.numeric(scores_vec)
+) |>
+  dplyr::arrange(dplyr::desc(score))
+
+# Keep top 40  by corr scores
+corr_table <- corr_table[!corr_table$variable %in% targets, ]
+top40_vars <- head(corr_table$variable, 40)
+
+print(head(corr_table, 40))
+
+## ----- separation line
+## 2. Define economic blocks 
+
+block_real <- c(
+  "GDP_new", "BSI_new", "GPI_new", "SPI_new",
+  "IP_new", "NDM_new", "DM_new", "CON_new",
+  "RT_new", "WT_new", "PA_new", "FIN_new",
+  "TOT_HRS_CAN", "GOOD_HRS_CAN"
+)
+
+block_labour <- c(
+  "EMP_CAN", "EMP_SERV_CAN", "EMP_FOR_OIL_CAN",
+  "EMP_CONS_CAN", "EMP_SALES_CAN", "EMP_FIN_CAN",
+  "EMP_MANU_CAN", "EMP_PART_CAN",
+  "UNEMP_CAN",
+  "UNEMP_DURA_1-4_CAN", "UNEMP_DURA_5-13_CAN",
+  "UNEMP_DURA_14-25_CAN", "UNEMP_DURA_27+_CAN",
+  "UNEMP_DURAvg_CAN_new",
+  "CLAIMS_CAN",
+  "TOT_HRS_CAN", "GOOD_OVT_HRS_CAN"
+)
+
+block_house_price <- c(
+  "NHOUSE_P_CAN",
+  "NHOUSE_P_NF", "NHOUSE_P_PEI", "NHOUSE_P_NS", "NHOUSE_P_NB",
+  "NHOUSE_P_QC", "NHOUSE_P_ONT", "NHOUSE_P_MAN", "NHOUSE_P_SAS",
+  "NHOUSE_P_ALB", "NHOUSE_P_BC"
+)
+
+block_house_activity <- c(
+  "hstart_CAN_new",
+  "hstart_NF_new", "hstart_PEI_new", "hstart_NS_new",
+  "hstart_NB_new", "hstart_QC_new", "hstart_ONT_new",
+  "hstart_MAN_new", "hstart_SAS_new", "hstart_ALB_new",
+  "hstart_BC_new",
+  "build_Total_CAN_new", "build_Ind_CAN_new", "build_Comm_CAN_new",
+  "build_Total_NF_new", "build_Total_PEI_new", "build_Total_NS_new",
+  "build_Total_NB_new", "build_Total_QC_new", "build_Total_ONT_new",
+  "build_Total_MAN_new", "build_Total_SAS_new", "build_Total_ALB_new",
+  "build_Total_BC_new"
+)
+
+block_manu <- c(
+  "MANU_N_ORD_new", "MANU_UNFIL_new", "MANU_TOT_INV_new",
+  "MANU_INV_RAT_new", "N_DUR_INV_RAT_new",
+  "DUR_N_ORD_new", "DUR_UNFIL_new",
+  "DUR_TOT_INV_new", "DUR_INV_RAT_new"
+)
+
+block_money_credit <- c(
+  "M3", "M2p", "M_BASE1",
+  "CRED_BUS_cb", "CRED_HOUS_cb", "CRED_MORT_HOUSE_cb", "CRED_T_cb",
+  "CRED_HOUS_non_MORT", "CRED_HOUS_MORT", "CRED_HOUS", "CRED_BUS"
+)
+
+block_rates <- c(
+  "BANK_RATE_L",
+  "GOV_AVG_1_3Y", "GOV_AVG_3_5Y", "GOV_AVG_5_10Y", "GOV_AVG_10pY",
+  "MORTG_1Y", "MORTG_5Y",
+  "TBILL_3M", "TBILL_6M",
+  "G_AVG_1-3-Bank_rate", "G_AVG_3-5-Bank_rate",
+  "G_AVG_5-10-Bank_rate", "TBILL_6M-Bank_rate",
+  "G_AVG_10p-TBILL_3M"
+)
+
+block_external <- c(
+  "RES_TOT", "RES_USD", "RES_IMF",
+  "Imp_BP_new", "IOIL_BP_new", "Exp_BP_new", "EOIL_BP_new",
+  "EX_ENER_BP_new", "EX_MINER_BP_new", "EX_METAL_BP_new",
+  "EX_IND_EQUIP_BP_new", "EX_TRANSP_BP_new", "EX_CONS_BP_new",
+  "IMP_METAL_BP_new", "IMP_IND_EQUIP_BP_new",
+  "IMP_TRANSP_BP_new", "IMP_CONS_BP_new",
+  "USDCAD_new", "JPYCAD_new", "GBPCAD_new",
+  "CAN_EQTY_NETFLOW", "CAN_SEC_NETFLOW",
+  "FOR_SEC_NETFLOW", "CAN_US_SEC_NETFLOW"
+)
+
+block_prices <- c(
+  "CPI_ALL_CAN", "CPI_SHEL_CAN", "CPI_CLOT_CAN", "CPI_HEA_CAN",
+  "CPI_MINUS_FOO_CAN", "CPI_MINUS_FEN_CAN",
+  "CPI_GOO_CAN", "CPI_DUR_CAN", "CPI_SERV_CAN",
+  "IPPI_CAN", "IPPI_ENER_CAN", "IPPI_WOOD_CAN",
+  "IPPI_METAL_CAN", "IPPI_MOTOR_CAN", "IPPI_MACH_CAN"
+)
+
+block_markets <- c(
+  "OILP_new", "OIL_CAN_new", "WTISPLC",
+  "TSX_HI", "TSX_LO", "TSX_CLO"
+)
+
+blocks <- list(
+  real           = block_real,
+  labour         = block_labour,
+  house_price    = block_house_price,
+  house_activity = block_house_activity,
+  manu           = block_manu,
+  money_credit   = block_money_credit,
+  rates          = block_rates,
+  external       = block_external,
+  prices         = block_prices,
+  markets        = block_markets
+)
+
+## 3. Helper: score lookup + within-block selection
+
+score_lookup <- function(v) {
+  out <- corr_table$score[match(v, corr_table$variable)]
+  ifelse(is.na(out), 0, out)
+}
+
+pick_block_reps <- function(block_vars,
+                            top_vars,
+                            df,
+                            n_per_block = 2,
+                            corr_cutoff = 0.90) {
+  cand <- intersect(block_vars, intersect(top_vars, names(df)))
+  if (length(cand) == 0) return(character(0))
+  
+  cand_scores <- score_lookup(cand)
+  ord         <- order(cand_scores, decreasing = TRUE)
+  cand        <- cand[ord]
+  
+  picked <- character(0)
+  
+  for (v in cand) {
+    if (length(picked) == 0) {
+      picked <- c(picked, v)
+    } else {
+      too_close <- FALSE
+      for (u in picked) {
+        cval <- cor(df[[v]], df[[u]], use = "complete.obs")
+        if (is.finite(cval) && abs(cval) > corr_cutoff) {
+          too_close <- TRUE
+          break
+        }
+      }
+      if (!too_close) {
+        picked <- c(picked, v)
+      }
+    }
+    if (length(picked) >= n_per_block) break
+  }
+  
+  picked
+}
+
+## 4. Apply: choose up to 2 per block (variety)
+
+set.seed(12345)  
+
+selected_by_block <- lapply(names(blocks), function(bn) {
+  vars <- pick_block_reps(
+    block_vars   = blocks[[bn]],
+    top_vars     = top40_vars,
+    df           = df_large,
+    n_per_block  = 2,       
+    corr_cutoff  = 0.90
+  )
+
+  if (length(vars) == 0) return(NULL)
+  
+  data.frame(
+    block    = bn,
+    variable = vars,
+    stringsAsFactors = FALSE
+  )
+})
+
+
+selected_by_block <- do.call(rbind, selected_by_block)
+selected_by_block
+
+## 5. Final large-model variable set
+
+vars_large_final <- unique(c(
+  targets,                     
+  selected_by_block$variable   
+))
+
+length(vars_large_final)
+vars_large_final
+
+```
+# 4. Large Model: Short Horizon
+```{r}
+X_large <- df_large %>%
+  dplyr::select(all_of(vars_large_final)) %>%
+  as.matrix() %>% na.omit()
+
+p_grid_short <- 1:12
+ts_cv_rmse_TARGETS_only <- function(X, p, K = 10, max_h = 3, target_idx) {
+  n <- nrow(X)
+  start_cv <- floor(n * 0.4)
+  cut_points <- round(seq(start_cv, n - max_h, length.out = K))
+  
+  err_list <- list()
+  
+  for (t0 in cut_points) {
+    train <- X[1:t0, , drop = FALSE]
+    actual <- X[(t0+1):(t0+max_h), target_idx, drop = FALSE]
+    
+    model <- try(VAR(train, p = p, type = "const"), silent = TRUE)
+    if (inherits(model, "try-error")) next
+    
+    pred_list <- predict(model, n.ahead = max_h)$fcst
+    pred_mat <- sapply(target_idx, function(j) pred_list[[j]][,"fcst"])
+    
+    err <- actual - pred_mat
+    err_list[[length(err_list)+1]] <- err
+  }
+  
+  all_err <- do.call(rbind, err_list)
+  sqrt(mean(all_err^2, na.rm = TRUE))
+}
+
+target_idx <- match(
+  c("GDP_per_w","CPI_ALL_CAN","NHOUSE_P_CAN"),
+  vars_large_final
+)
+
+results_large_short_opt2 <- data.frame(p = integer(), avg_RMSE = numeric())
+
+for (p in p_grid_short) {
+  rmse_p <- ts_cv_rmse_TARGETS_only(
+    X = X_large,
+    p = p,
+    K = 10,
+    max_h = 3,
+    target_idx = target_idx
+  )
+  results_large_short_opt2 <- rbind(
+    results_large_short_opt2,
+    data.frame(p = p, avg_RMSE = rmse_p)
+  )
+  cat("Large VAR Short CV: p =", p, "| RMSE =", rmse_p, "\n")
+}
+
+## it give CV table p=[1:12] lol
+
+best_id2 <- which.min(results_large_short_opt2$avg_RMSE)
+best_p_large_short_opt2 <- results_large_short_opt2$p[best_id2]
+best_p_large_short_opt2
+```
+
+# 5. Large: model: Long Horizon
+```{r}
+p_grid_long <- 1:12
+results_large_long_opt2 <- data.frame(p = integer(), avg_RMSE = numeric())
+
+for (p in p_grid_long) {
+  rmse_p <- ts_cv_rmse_TARGETS_only(
+    X = X_large,
+    p = p,
+    K = 10,
+    max_h = 12,
+    target_idx = target_idx
+  )
+  results_large_long_opt2 <- rbind(
+    results_large_long_opt2,
+    data.frame(p = p, avg_RMSE = rmse_p)
+  )
+  cat("Large VAR Long CV: p =", p, "| RMSE =", rmse_p, "\n")
+}
+
+## it give CV table p=[1:12] lol
+best_id2L <- which.min(results_large_long_opt2$avg_RMSE)
+best_p_large_long_opt2 <- results_large_long_opt2$p[best_id2L]
+best_p_large_long_opt2
+```
+
+# 6. RMSE Comparison: Small VAR vs Large VAR
+```{r}
+rmse_targets_only <- function(X, p, K = 10, max_h = 3, target_idx) {
+  n <- nrow(X)
+  start_cv  <- floor(n * 0.4)
+  cut_pts   <- round(seq(start_cv, n - max_h, length.out = K))
+
+  err_list <- list()
+
+  for (t0 in cut_pts) {
+    train  <- X[1:t0, , drop = FALSE]
+    actual <- X[(t0 + 1):(t0 + max_h), target_idx, drop = FALSE]
+
+    model <- try(VAR(train, p = p, type = "const"), silent = TRUE)
+    if (inherits(model, "try-error")) next
+
+    pred_obj <- predict(model, n.ahead = max_h)$fcst
+    pred_mat <- sapply(target_idx, function(j) pred_obj[[j]][, "fcst"])
+
+    err_list[[length(err_list) + 1]] <- actual - pred_mat
+  }
+
+  all_err <- do.call(rbind, err_list)
+  sqrt(mean(all_err^2, na.rm = TRUE))
+}
+
+## Short-term forecast performance (h = 1–3)
+# Small model: RMSE from earlier K-fold CV (3-var VAR).
+rmse_small_short <- min(results_p$avg_RMSE, na.rm = TRUE)
+
+# Large model: RMSE for the same 3 target series
+rmse_large_short_opt2 <- rmse_targets_only(
+  X          = X_large,
+  p          = best_p_large_short_opt2,
+  K          = 10,
+  max_h      = 3,
+  target_idx = target_idx
+)
+
+short_term_table <- data.frame(
+  Model     = c("Small VAR (3 variables)",
+                "Large VAR (17 variables)"),
+  Lag_p     = c(p_opt,
+                best_p_large_short_opt2),
+  RMSE_1to3 = c(rmse_small_short,
+                rmse_large_short_opt2)
+)
+
+short_term_table
+
+
+## Long-term forecast performance (h = 1–12)
+
+# Small model: RMSE from small K-fold CV (3-variable VAR, long horizon)
+rmse_small_long <- min(results_pl$avg_RMSE, na.rm = TRUE)
+
+# Large model: RMSE of 3 target series
+rmse_large_long_opt2 <- rmse_targets_only(
+  X          = X_large,
+  p          = best_p_large_long_opt2,
+  K          = 10,
+  max_h      = 12,
+  target_idx = target_idx
+)
+
+long_term_table <- data.frame(
+  Model      = c("Small VAR (3 variables)",
+                 "Large VAR (17 variables)"),
+  Lag_p      = c(p_optl,
+                 best_p_large_long_opt2),
+  RMSE_1to12 = c(rmse_small_long,
+                 rmse_large_long_opt2)
+)
+
+long_term_table
+```
+## 7. Final baseline VAR models
+```{r}
+var_ts_small <- ts(
+  df_subset %>%
+    dplyr::select(all_of(vars_3)),
+  start     = c(start_year, start_month),
+  frequency = 12
+)
+# Short-Horizon small VAR 
+var_small_short <- VAR(
+  y    = var_ts_small,
+  p    = p_opt,
+  type = "const"
+)
+
+# Long-Horizon small VAR 
+var_small_long <- VAR(
+  y    = var_ts_small,
+  p    = p_optl,
+  type = "const"
+)
+
+var_ts_large <- ts(
+  df_large %>%
+    dplyr::select(all_of(vars_large_final)),
+  start     = c(start_year, start_month),
+  frequency = 12
+)
+
+# Short-term large VAR 
+var_large_short <- VAR(
+  y    = var_ts_large,
+  p    = best_p_large_short_opt2,
+  type = "const"
+)
+
+# Long-term large VAR
+var_large_long <- VAR(
+  y    = var_ts_large,
+  p    = best_p_large_long_opt2,
+  type = "const"
+)
+
+## Too long hide it
+#summary(var_small_short)
+#summary(var_small_long)
+#summary(var_large_short)
+#summary(var_large_long)
+```
+
+
+#. 8.Forecast 
+
+```{r}
+H_short <- 3
+H_long  <- 12
+
+#  VAR forecasts
+fc_large_short <- predict(var_large_short, n.ahead = H_short)$fcst
+fc_large_long  <- predict(var_large_long,  n.ahead = H_long)$fcst
+
+# Last observed date --> so no gap 
+last_date <- max(df_subset$Date)
+
+dates_short <- seq(last_date %m+% months(1), by = "1 month", length.out = H_short)
+dates_long  <- seq(last_date %m+% months(1), by = "1 month", length.out = H_long)
+
+make_var_long <- function(fc_obj, H, dates_vec) {
+  tibble(
+    variable = rep(c("GDP_per_w", "CPI_ALL_CAN", "NHOUSE_P_CAN"), each = H),
+    h        = rep(1:H, times = 3),
+    date     = rep(dates_vec, times = 3),
+    forecast = c(
+      fc_obj$GDP_per_w[, "fcst"],
+      fc_obj$CPI_ALL_CAN[, "fcst"],
+      fc_obj$NHOUSE_P_CAN[, "fcst"]
+    )
+  )
+}
+
+var_large_short_long <- make_var_long(fc_large_short, H_short, dates_short)
+var_large_long_long  <- make_var_long(fc_large_long,  H_long,  dates_long)
+
+# CSV for the "empirical_results" file to merge other noteboaks.
+write.csv(var_large_short_long,
+          "VAR_large_all_variables_short.csv",
+          row.names = FALSE)
+
+write.csv(var_large_long_long,
+          "VAR_large_all_variables_long.csv",
+          row.names = FALSE)
+```
+
+
+

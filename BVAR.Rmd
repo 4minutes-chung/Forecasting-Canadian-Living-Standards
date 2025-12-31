@@ -1,0 +1,92 @@
+---
+title: "BVAR Forecasting Three Variaible"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+
+```{r}
+## We do not have time and space to merge this into our analysis. However, some solid result still worth mentioning and recorded.
+
+options(repos = c(CRAN = "https://cloud.r-project.org"))
+
+if (!requireNamespace("librarian", quietly = TRUE)) install.packages("librarian")
+librarian::shelf(readr, dplyr, lubridate, tidyr, BVAR)
+
+
+df <- readr::read_csv("balanced_can_md.csv", show_col_types = FALSE) |>
+  dplyr::mutate(
+    Date      = as.Date(Date),
+    GDP_per_w = GDP_new - EMP_CAN
+  ) |>
+  dplyr::arrange(Date)
+
+
+df_small <- df |>
+  dplyr::select(
+    Date,
+    infl_can      = CPI_ALL_CAN,    
+    gdp_pc_proxy  = GDP_per_w,
+    house_price   = NHOUSE_P_CAN
+  ) |>
+  tidyr::drop_na()
+
+Y_bvar  <- as.matrix(df_small[, c("infl_can", "gdp_pc_proxy", "house_price")])
+n_total <- nrow(Y_bvar)
+
+
+h_out   <- 24L
+train_n <- n_total - h_out
+
+Y_train <- Y_bvar[1:train_n, , drop = FALSE]
+Y_test  <- Y_bvar[(train_n + 1):n_total, , drop = FALSE]
+
+
+p_bvar      <- 2L
+priors_bvar <- BVAR::bv_priors()
+
+set.seed(123)
+bvar_model <- BVAR::bvar(
+  data   = Y_train,
+  lags   = p_bvar,
+  n_draw = 8000L,
+  n_burn = 4000L,
+  priors = priors_bvar,
+  verbose = FALSE
+)
+
+
+rmse_vec <- BVAR::rmse(bvar_model, holdout = Y_test)
+
+bvar_rmse_by_var <- data.frame(
+  Variable = colnames(Y_bvar),
+  RMSE     = as.numeric(rmse_vec)
+)
+
+
+rmse_avg <- mean(bvar_rmse_by_var$RMSE)
+
+
+readr::write_csv(bvar_rmse_by_var, "bvar_rmse_by_var.csv")
+
+bvar_summary <- data.frame(
+  Model      = "BVAR (3 variables, p=2)",
+  Lag_p      = 2L,
+  RMSE_1to12 = rmse_avg
+)
+
+readr::write_csv(bvar_summary, "bvar_holdout_summary.csv")
+
+print("======== BVAR RESULTS ========")
+print(bvar_rmse_by_var)
+print(bvar_summary)
+print("CSV files saved:")
+print(" - bvar_rmse_by_var.csv")
+print(" - bvar_holdout_summary.csv")
+
+
+## it should lead to result saying that 3 variables models with BVAR beat VAR with 17 var. However, we do not have time and space to merge this into our analysis.
+
+```
+

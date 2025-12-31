@@ -1,0 +1,232 @@
+---
+title: 'Project: KAGGLE BART CODE'
+output:
+  pdf_document: default
+  html_notebook: default
+---
+In this file, it captured the code i used on KAGGLE that takes 2 hours to run. In R studio, my computer overheat and will crash.
+# 0.Packages
+```{r}
+
+library(tidyverse) 
+
+list.files(path = "../input")
+# Burda style 
+R_packages <- c("dbarts", "tidyverse", "lubridate", "knitr")
+
+options(repos = c(CRAN = "https://cloud.r-project.org"))
+
+if (!requireNamespace("librarian", quietly = TRUE))
+  install.packages("librarian")
+
+librarian::shelf(R_packages)
+## KAGGLE code
+df_ml <- read.csv("/kaggle/input/dataset/balanced_can_md.csv")
+df_ml$GDP_per_w <- df_ml$GDP_new - df_ml$EMP_CAN
+df_ml %>% 
+  select(Date, GDP_new, EMP_CAN, GDP_per_w) %>% 
+  head(10)
+
+targets <- c("GDP_per_w", "CPI_ALL_CAN", "NHOUSE_P_CAN")
+
+features_large <- c(
+  "GDP_per_w", "CPI_ALL_CAN", "NHOUSE_P_CAN", "IP_new",
+  "BSI_new", "UNEMP_CAN", "EMP_CONS_CAN", "hstart_CAN_new",
+  "CRED_HOUS", "CRED_HOUS_MORT", "BANK_RATE_L", "TBILL_3M",
+  "Exp_BP_new", "Imp_BP_new", "IPPI_METAL_CAN", "OILP_new",
+  "WTISPLC"
+)
+```
+
+# 1. Helper 1: lag panel
+```{r}
+build_lagged_panel <- function(df_ml, predictors, targets, p, h) {
+  dat <- df_ml %>%
+    dplyr::select(Date, dplyr::all_of(unique(c(predictors, targets)))) %>%
+    arrange(Date)
+  
+  for (lag in 1:p) {
+    for (v in predictors) {
+      new_name <- paste0("L", lag, "_", v)
+      dat[[new_name]] <- dplyr::lag(dat[[v]], lag)
+    }
+  }
+
+  for (v in targets) {
+    lead_name <- paste0("F", h, "_", v)
+    dat[[lead_name]] <- dplyr::lead(dat[[v]], h)
+  }
+  
+  lag_cols <- grep("^L[0-9]+_", names(dat), value = TRUE)
+  y_cols   <- paste0("F", h, "_", targets)
+  
+  dat_final <- dat %>%
+    dplyr::select(dplyr::all_of(c(lag_cols, y_cols))) %>%
+    tidyr::drop_na()
+  
+  list(
+    X = as.matrix(dat_final[, lag_cols, drop = FALSE]),
+    Y = as.matrix(dat_final[, y_cols,  drop = FALSE])   # columns match targets
+  )
+}
+```
+
+# 2. BART_time_series_CV
+```{r}
+bart_ts_cv_rmse <- function(df_ml, predictors, targets,
+                            p,
+                            K        = 10,
+                            max_h,
+                            ntree    = 150,   
+                            ndpost   = 200,   
+                            nskip    = 200) { 
+  
+  se_all <- list()
+  
+  for (h in 1:max_h) {
+    panel <- build_lagged_panel(df_ml, predictors, targets, p, h)
+    X <- panel$X
+    Y <- panel$Y
+    
+    n   <- nrow(X)
+    n_y <- ncol(Y)
+    
+    if (n < K + 5) stop("Too few obs after lags/leads for this p / h.")
+    
+    start_idx <- floor(0.6 * n)
+    fold_ends <- floor(seq(from = start_idx, to = n - 1, length.out = K))
+    
+    se_h <- matrix(NA_real_, nrow = 0, ncol = n_y)
+    
+    for (end_idx in fold_ends) {
+      train_idx <- 1:end_idx
+      test_idx  <- end_idx + 1
+      if (test_idx > n) break
+      
+      x_train <- X[train_idx, , drop = FALSE]
+      y_train <- Y[train_idx, , drop = FALSE]
+      x_test  <- X[test_idx, , drop = FALSE]
+      
+      preds <- numeric(n_y)
+      
+  
+      for (j in seq_len(n_y)) {
+        fit_bart <- dbarts::bart(
+          x.train  = x_train,
+          y.train  = y_train[, j],
+          x.test   = x_test,
+          ntree    = ntree,
+          ndpost   = ndpost,
+          nskip    = nskip,
+          keeptrees = FALSE,
+          verbose   = FALSE
+        )
+        
+        preds[j] <- fit_bart$yhat.test.mean
+      }
+      
+      se_h <- rbind(se_h, (Y[test_idx, ] - preds)^2)
+    }
+    
+    se_all[[h]] <- se_h
+  }
+  
+  se_cat <- do.call(rbind, se_all)
+  sqrt(mean(se_cat, na.rm = TRUE))  
+}
+```
+
+# 3. SHORT-HORIZON BART, h=1-3. (Output release end of this block)
+```{r}
+## Please run carefully this block as it would definitely crash!!!
+p_grid <- 1:12
+
+results_bart_short <- data.frame(p = integer(), RMSE_1to3 = numeric())
+
+for (p in p_grid) {
+  rmse_p <- bart_ts_cv_rmse(
+    df_ml     = df_ml,
+    predictors = features_large,
+    targets    = targets,
+    p          = p,
+    K          = 10,
+    max_h      = 3
+  )
+  
+  results_bart_short <- rbind(
+    results_bart_short,
+    data.frame(p = p, RMSE_1to3 = rmse_p)
+  )
+  
+  cat("BART short: p =", p, "RMSE_1to3 =", round(rmse_p, 6), "\n")
+}
+
+results_bart_short
+
+best_row_bart_short  <- results_bart_short[which.min(results_bart_short$RMSE_1to3), ]
+best_p_bart_short    <- best_row_bart_short$p
+rmse_bart_short_best <- best_row_bart_short$RMSE_1to3
+
+short_term_bart_table <- data.frame(
+  Model    = "BART ",
+  Lag_p    = best_p_bart_short,
+  RMSE_1to3 = rmse_bart_short_best
+)
+
+short_term_bart_table
+```
+
+
+
+# 4. Long horizon BART , h =1-12
+```{r}
+results_bart_long <- data.frame(p = integer(), RMSE_1to12 = numeric())
+
+for (p in p_grid) {
+  rmse_p <- bart_ts_cv_rmse(
+    df_ml     = df_ml,
+    predictors = features_large,
+    targets    = targets,
+    p          = p,
+    K          = 10,
+    max_h      = 12
+  )
+  
+  results_bart_long <- rbind(
+    results_bart_long,
+    data.frame(p = p, RMSE_1to12 = rmse_p)
+  )
+  
+  cat("BART long: p =", p, "RMSE_1to12 =", round(rmse_p, 6), "\n")
+}
+
+results_bart_long
+
+best_row_bart_long  <- results_bart_long[which.min(results_bart_long$RMSE_1to12), ]
+best_p_bart_long    <- best_row_bart_long$p
+rmse_bart_long_best <- best_row_bart_long$RMSE_1to12
+
+long_term_bart_table <- data.frame(
+  Model     = "BART",
+  Lag_p     = best_p_bart_long,
+  RMSE_1to12 = rmse_bart_long_best
+)
+
+long_term_bart_table
+```
+
+# 5. Result to export
+```{r}
+# -> data back to local csv and combine everything
+write.csv(short_term_bart_table, "/kaggle/working/bart_short.csv", row.names = FALSE)
+write.csv(long_term_bart_table, "/kaggle/working/bart_long.csv", row.names = FALSE)
+
+knitr::kable(short_term_bart_table)
+knitr::kable(long_term_bart_table)
+```
+
+```{r}
+#All I do in this shot file is to jsut get the opt_p, nth else are saved actually,
+```
+
+## 
