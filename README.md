@@ -22,7 +22,7 @@ Using the CAN-MD dataset (Fortin-Gagnon et al., 2018), the analysis evaluates fo
 ├── README.md                        # This file
 ├── packages.R                       # Install all R package dependencies
 │
-├── src/                             # Source R and Rmd analysis scripts
+├── Rmd_files/                             # Source R and Rmd analysis scripts
 │   ├── 01_VAR_model.Rmd            # Baseline VAR model & validation
 │   ├── 02_RF_cv.Rmd                # Random Forest with time-series cross-validation
 │   ├── 03_RF_application.Rmd       # RF applied to forecast targets
@@ -31,8 +31,7 @@ Using the CAN-MD dataset (Fortin-Gagnon et al., 2018), the analysis evaluates fo
 │   ├── 05_BART_application.Rmd     # BART applied to forecast targets
 │   ├── 06_results_tables_graphs.Rmd # Final results, tables, and visualizations
 │   ├── 07_BVAR_exploratory.Rmd     # Bayesian VAR exploratory analysis
-│   └── utils/
-│       └── plot_functions.R        # Shared plotting utilities
+│   
 │
 ├── data/                            # Input data
 │   ├── raw/                         # Original source files
@@ -51,11 +50,8 @@ Using the CAN-MD dataset (Fortin-Gagnon et al., 2018), the analysis evaluates fo
 │   └── notebooks/                  # HTML notebooks
 │
 ├── paper/                           # Final deliverable
-│   └── ECO1400_Term_Paper_Steven_Victor.pdf
-│
-└── references/                      # Academic papers
-    ├── core/                        # Directly cited in analysis
-    └── background/                  # Supplementary reading
+    └── ECO1400_Term_Paper_Steven_Victor.pdf
+
 ```
 
 ---
