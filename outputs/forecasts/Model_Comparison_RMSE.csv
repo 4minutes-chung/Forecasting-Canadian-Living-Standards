@@ -1,0 +1,5 @@
+"Model","RMSE_1to3","RMSE_1to12"
+"Small VAR (3 vars)",0.003892,0.003624
+"Large VAR (17 vars)",0.0030008,0.0034235
+"Random Forest",0.002372,0.002554
+"BART",0.00266,0.002717
